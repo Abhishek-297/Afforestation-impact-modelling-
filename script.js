@@ -1,9 +1,45 @@
-// Replace with your actual Colab ngrok URL
-const COLAB_API_URL = 'https://your-ngrok-url.ngrok-free.app/predict';
+// Tree species growth parameters and carbon sequestration models
+const treeSpecies = {
+    teak: {
+        name: "Teak",
+        maxAge: 50,
+        maxBiomass: 800, // kg per tree
+        growthRate: 0.25,
+        woodDensity: 0.65, // g/cm³
+        carbonFraction: 0.47
+    },
+    pine: {
+        name: "Pine",
+        maxAge: 40,
+        maxBiomass: 600, // kg per tree
+        growthRate: 0.30,
+        woodDensity: 0.45,
+        carbonFraction: 0.50
+    },
+    oak: {
+        name: "Oak",
+        maxAge: 60,
+        maxBiomass: 900, // kg per tree
+        growthRate: 0.20,
+        woodDensity: 0.72,
+        carbonFraction: 0.48
+    },
+    eucalyptus: {
+        name: "Eucalyptus",
+        maxAge: 30,
+        maxBiomass: 500, // kg per tree
+        growthRate: 0.35,
+        woodDensity: 0.55,
+        carbonFraction: 0.49
+    }
+};
+
+// CO2 to Carbon conversion factor
+const CO2_TO_CARBON_RATIO = 3.67; // 44/12 - molecular weight ratio
 
 let co2Chart = null;
 
-async function calculateImpact() {
+function calculateImpact() {
     // Get input values
     const species = document.getElementById('species').value;
     const numTrees = parseInt(document.getElementById('numTrees').value);
@@ -15,43 +51,98 @@ async function calculateImpact() {
         return;
     }
 
+    if (numTrees < 1 || numTrees > 100000) {
+        showError('Number of trees must be between 1 and 100,000');
+        return;
+    }
+
+    if (years < 1 || years > 50) {
+        showError('Project duration must be between 1 and 50 years');
+        return;
+    }
+
     // Show loading, hide previous results/errors
     showLoading();
     hideResults();
     hideError();
 
-    try {
-        // Call Colab API
-        const response = await fetch(COLAB_API_URL, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                species: species,
-                num_trees: numTrees,
-                years: years
-            })
+    // Use setTimeout to allow UI to update before heavy calculation
+    setTimeout(() => {
+        try {
+            const results = calculateCarbonSequestration(species, numTrees, years);
+            displayResults(results);
+        } catch (error) {
+            console.error('Error:', error);
+            showError('Failed to calculate impact. Please try again.');
+        } finally {
+            hideLoading();
+        }
+    }, 100);
+}
+
+function calculateCarbonSequestration(species, numTrees, years) {
+    const speciesData = treeSpecies[species];
+    const results = [];
+    let totalCO2 = 0;
+
+    for (let year = 1; year <= years; year++) {
+        // Calculate biomass using logistic growth model
+        const biomass = calculateBiomass(year, speciesData);
+        
+        // Calculate carbon content
+        const carbonContent = biomass * speciesData.carbonFraction; // kg carbon per tree
+        
+        // Convert carbon to CO2 equivalent
+        const co2PerTree = carbonContent * CO2_TO_CARBON_RATIO; // kg CO2 per tree
+        
+        // Calculate total CO2 for all trees (convert to metric tons)
+        const totalCo2ForYear = (co2PerTree * numTrees) / 1000; // metric tons
+        
+        totalCO2 += totalCo2ForYear;
+
+        results.push({
+            year: year,
+            biomass_per_tree: Math.round(biomass * 10) / 10, // 1 decimal place
+            co2_per_tree: Math.round(co2PerTree * 10) / 10, // 1 decimal place
+            total_co2: Math.round(totalCO2 * 10) / 10 // cumulative total
         });
-
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        if (data.success) {
-            displayResults(data);
-        } else {
-            throw new Error(data.error || 'Unknown error occurred');
-        }
-
-    } catch (error) {
-        console.error('Error:', error);
-        showError('Failed to calculate impact. Please try again later.');
-    } finally {
-        hideLoading();
     }
+
+    return {
+        success: true,
+        species: speciesData.name,
+        num_trees: numTrees,
+        years: years,
+        final_co2: Math.round(totalCO2),
+        results: results
+    };
+}
+
+function calculateBiomass(age, speciesData) {
+    // Logistic growth model for biomass accumulation
+    // B(t) = K / (1 + A * e^(-r*t))
+    // Where:
+    // K = maximum biomass (carrying capacity)
+    // r = growth rate
+    // A = (K - B0)/B0, where B0 is initial biomass
+    // t = age in years
+    
+    const K = speciesData.maxBiomass;
+    const r = speciesData.growthRate;
+    const B0 = 0.1; // Initial biomass (kg) - small sapling
+    
+    const A = (K - B0) / B0;
+    
+    // Calculate biomass using logistic growth equation
+    let biomass = K / (1 + A * Math.exp(-r * age));
+    
+    // Ensure biomass doesn't exceed maximum and is realistic
+    biomass = Math.min(biomass, K);
+    
+    // Apply wood density factor
+    biomass *= speciesData.woodDensity;
+    
+    return Math.max(biomass, 0);
 }
 
 function displayResults(data) {
@@ -112,6 +203,15 @@ function createChart(results) {
                         text: 'Years'
                     }
                 }
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            return `Year ${context.label}: ${context.parsed.y.toLocaleString()} tons CO₂`;
+                        }
+                    }
+                }
             }
         }
     });
@@ -136,8 +236,8 @@ function createTable(results) {
         tableHTML += `
             <tr>
                 <td>${result.year}</td>
-                <td>${result.biomass_per_tree}</td>
-                <td>${result.co2_per_tree}</td>
+                <td>${result.biomass_per_tree.toFixed(1)}</td>
+                <td>${result.co2_per_tree.toFixed(1)}</td>
                 <td>${result.total_co2.toLocaleString()}</td>
             </tr>
         `;
@@ -174,7 +274,21 @@ function hideError() {
     document.getElementById('error').classList.add('hidden');
 }
 
-// Initialize with some default values or example
+// Add some sample data visualization on load
 document.addEventListener('DOMContentLoaded', function() {
-    // You can add any initialization code here
+    // You can add initialization code here if needed
+    console.log('Afforestation Impact Calculator Loaded');
+    
+    // Optional: Add event listeners for real-time updates
+    document.getElementById('species').addEventListener('change', function() {
+        hideResults();
+    });
+    
+    document.getElementById('numTrees').addEventListener('input', function() {
+        hideResults();
+    });
+    
+    document.getElementById('years').addEventListener('input', function() {
+        hideResults();
+    });
 });
